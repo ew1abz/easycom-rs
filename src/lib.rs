@@ -33,5 +33,6 @@ pub mod transport;
 
 pub use command::{Command, Response};
 pub use error::Error;
+pub use framing::CommandParser;
 pub use session::Session;
 pub use transport::Transport;

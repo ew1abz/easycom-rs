@@ -245,7 +245,165 @@ fn parse_hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
-// ── Incremental Parser ────────────────────────────────────────────────────────
+// ── Response encoding ─────────────────────────────────────────────────────────
+
+/// Encode a [`Response`] into `buf` (no-std / fixed-buffer variant).
+///
+/// Returns the number of bytes written.  `buf` must be at least 16 bytes.
+///
+/// | Response          | Frame             | Bytes |
+/// |-------------------|-------------------|-------|
+/// | `Ack`             | `+\r`             | 2     |
+/// | `Error`           | `?\r`             | 2     |
+/// | `Position{az,el}` | `AZ=NNN EL=NNN\r` | 14    |
+pub fn encode_response_into(resp: &Response, buf: &mut [u8]) -> usize {
+    match resp {
+        Response::Ack => {
+            buf[0] = b'+';
+            buf[1] = b'\r';
+            2
+        }
+        Response::Error => {
+            buf[0] = b'?';
+            buf[1] = b'\r';
+            2
+        }
+        Response::Position { az, el } => {
+            // "AZ=NNN EL=NNN\r" — 14 bytes
+            buf[0] = b'A';
+            buf[1] = b'Z';
+            buf[2] = b'=';
+            write_3digits(buf, 3, *az);
+            buf[6] = b' ';
+            buf[7] = b'E';
+            buf[8] = b'L';
+            buf[9] = b'=';
+            write_3digits(buf, 10, *el);
+            buf[13] = b'\r';
+            14
+        }
+    }
+}
+
+// ── Device-side command parsing ───────────────────────────────────────────────
+
+/// Maximum raw command frame length (bytes before the trailing `\r`).
+/// Longest command: `O+360-180` = 9 bytes; 16 leaves headroom.
+const MAX_CMD_FRAME: usize = 16;
+
+/// Byte-by-byte accumulator that parses incoming *host commands* from frames
+/// terminated with `\r`.
+///
+/// This is the device-side counterpart to [`Parser`], which decodes *device
+/// responses*.  Use `CommandParser` in rotator firmware; use `Parser` in
+/// host-side controller software.
+pub struct CommandParser {
+    buf: [u8; MAX_CMD_FRAME],
+    len: usize,
+}
+
+impl CommandParser {
+    /// Create a new, empty parser.
+    pub const fn new() -> Self {
+        Self {
+            buf: [0u8; MAX_CMD_FRAME],
+            len: 0,
+        }
+    }
+
+    /// Feed one byte.
+    ///
+    /// Returns `Some(command)` when a complete `\r`-terminated frame has been
+    /// assembled and successfully decoded, `None` otherwise.
+    /// Malformed or overlong frames are silently discarded.
+    pub fn feed(&mut self, byte: u8) -> Option<Command> {
+        if byte == b'\r' || byte == b'\n' {
+            let cmd = decode_command(&self.buf[..self.len]);
+            self.len = 0;
+            cmd
+        } else if self.len < MAX_CMD_FRAME {
+            self.buf[self.len] = byte;
+            self.len += 1;
+            None
+        } else {
+            self.len = 0; // overlong — discard
+            None
+        }
+    }
+}
+
+impl Default for CommandParser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Parse a raw frame (bytes *before* the `\r`) as an Easycom host command.
+///
+/// Returns `None` for unknown or out-of-range frames.
+pub fn decode_command(frame: &[u8]) -> Option<Command> {
+    let frame = strip_cmd_checksum(frame);
+    match frame {
+        [] => None,
+        [b'C'] => Some(Command::QueryPosition),
+        [b'S'] => Some(Command::Stop),
+        [b'?'] => Some(Command::KeepAlive),
+        [b'A', d0, d1, d2] => parse_u16_3digit(*d0, *d1, *d2)
+            .filter(|&az| az <= 360)
+            .map(Command::Azimuth),
+        [b'E', d0, d1, d2] => parse_u16_3digit(*d0, *d1, *d2)
+            .filter(|&el| el <= 180)
+            .map(Command::Elevation),
+        [b'W', a0, a1, a2, b' ', e0, e1, e2] => {
+            let az = parse_u16_3digit(*a0, *a1, *a2).filter(|&v| v <= 360)?;
+            let el = parse_u16_3digit(*e0, *e1, *e2).filter(|&v| v <= 180)?;
+            Some(Command::AzimuthElevation { az, el })
+        }
+        [b'O', s1, a0, a1, a2, s2, e0, e1, e2] => {
+            let az = parse_signed_3digit(*s1, *a0, *a1, *a2)?;
+            let el = parse_signed_3digit(*s2, *e0, *e1, *e2)?;
+            Some(Command::Offset { az, el })
+        }
+        _ => None,
+    }
+}
+
+/// Strip an optional `*XX` XOR-checksum suffix from a command frame.
+fn strip_cmd_checksum(frame: &[u8]) -> &[u8] {
+    if frame.len() >= 3 {
+        if let Some(pos) = frame.iter().rposition(|&b| b == b'*') {
+            if pos + 3 <= frame.len() {
+                return &frame[..pos];
+            }
+        }
+    }
+    frame
+}
+
+fn parse_u16_3digit(d0: u8, d1: u8, d2: u8) -> Option<u16> {
+    let a = ascii_digit(d0)? as u16;
+    let b = ascii_digit(d1)? as u16;
+    let c = ascii_digit(d2)? as u16;
+    Some(a * 100 + b * 10 + c)
+}
+
+fn parse_signed_3digit(sign: u8, d0: u8, d1: u8, d2: u8) -> Option<i16> {
+    let mag = parse_u16_3digit(d0, d1, d2)? as i16;
+    match sign {
+        b'+' => Some(mag),
+        b'-' => Some(-mag),
+        _ => None,
+    }
+}
+
+fn ascii_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        _ => None,
+    }
+}
+
+// ── Incremental response Parser ───────────────────────────────────────────────
 
 /// Maximum size of a single Easycom frame (generous bound for a fixed buffer).
 const MAX_FRAME: usize = 64;
@@ -436,6 +594,93 @@ mod tests {
         assert_eq!(cmd, b"C\r");
         let resp = decode(b"AZ=270 EL=030\r").unwrap();
         assert_eq!(resp, Response::Position { az: 270, el: 30 });
+    }
+
+    // ── encode_response_into tests ────────────────────────────────────────────
+
+    #[test]
+    fn encode_response_ack() {
+        let mut buf = [0u8; 16];
+        let n = encode_response_into(&Response::Ack, &mut buf);
+        assert_eq!(&buf[..n], b"+\r");
+    }
+
+    #[test]
+    fn encode_response_error() {
+        let mut buf = [0u8; 16];
+        let n = encode_response_into(&Response::Error, &mut buf);
+        assert_eq!(&buf[..n], b"?\r");
+    }
+
+    #[test]
+    fn encode_response_position() {
+        let mut buf = [0u8; 16];
+        let n = encode_response_into(&Response::Position { az: 270, el: 45 }, &mut buf);
+        assert_eq!(&buf[..n], b"AZ=270 EL=045\r");
+    }
+
+    // ── decode_command tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn decode_command_query_position() {
+        assert_eq!(decode_command(b"C"), Some(Command::QueryPosition));
+    }
+
+    #[test]
+    fn decode_command_stop() {
+        assert_eq!(decode_command(b"S"), Some(Command::Stop));
+    }
+
+    #[test]
+    fn decode_command_keep_alive() {
+        assert_eq!(decode_command(b"?"), Some(Command::KeepAlive));
+    }
+
+    #[test]
+    fn decode_command_azimuth() {
+        assert_eq!(decode_command(b"A090"), Some(Command::Azimuth(90)));
+        assert_eq!(decode_command(b"A360"), Some(Command::Azimuth(360)));
+        assert_eq!(decode_command(b"A361"), None); // out of range
+    }
+
+    #[test]
+    fn decode_command_elevation() {
+        assert_eq!(decode_command(b"E045"), Some(Command::Elevation(45)));
+        assert_eq!(decode_command(b"E180"), Some(Command::Elevation(180)));
+        assert_eq!(decode_command(b"E181"), None);
+    }
+
+    #[test]
+    fn decode_command_azimuth_elevation() {
+        assert_eq!(
+            decode_command(b"W180 090"),
+            Some(Command::AzimuthElevation { az: 180, el: 90 })
+        );
+    }
+
+    #[test]
+    fn decode_command_offset() {
+        assert_eq!(
+            decode_command(b"O+010-005"),
+            Some(Command::Offset { az: 10, el: -5 })
+        );
+    }
+
+    #[test]
+    fn decode_command_strips_checksum() {
+        // "C*43" — checksum stripped, then decoded as QueryPosition
+        assert_eq!(decode_command(b"C*43"), Some(Command::QueryPosition));
+    }
+
+    #[test]
+    fn command_parser_incremental() {
+        let mut p = CommandParser::new();
+        let frame = b"A090\r";
+        let mut result = None;
+        for &b in frame {
+            result = p.feed(b);
+        }
+        assert_eq!(result, Some(Command::Azimuth(90)));
     }
 
     // ── Parser tests ──────────────────────────────────────────────────────────
