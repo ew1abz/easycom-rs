@@ -1,14 +1,17 @@
 # Prompt for Spec: Rust Library for Easycom Protocols
 
 **Objective:**
-Design a comprehensive specification for a Rust library that implements the Easycom protocol (a variant of Yaesu GS-232A/B). The spec should guide development and ensure correctness, extensibility and idiomatic Rust.
+Design a comprehensive specification for a Rust library that implements the Easycom
+protocol (a variant of Yaesu GS-232A/B). The spec should guide development and ensure
+correctness, extensibility and idiomatic Rust.
 
 **Description Elements:**
 
 1. **Background & Context**
    - Brief explanation of Yaesu GS-232A/B and how Easycom differs.
    - Use cases (e.g. controlling ham radio antenna rotators via serial, TCP/IP adapters).
-   - Protocol characteristics: message framing, command/response format, timeouts, error handling.
+   - Protocol characteristics: message framing, command/response format, timeouts,
+     error handling.
 
 2. **Architecture**
    - Core crate layout (e.g. `easycom-rs`, sub-modules for framing, commands, transport).

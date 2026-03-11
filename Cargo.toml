@@ -1,0 +1,36 @@
+[package]
+name = "easycom"
+version = "0.1.0"
+edition = "2024"
+description = "A Rust library implementing the Easycom antenna rotator control protocol (Yaesu GS-232A/B variant)"
+license = "MIT"
+repository = "https://github.com/ew1abz/easycom-rs"
+homepage = "https://github.com/ew1abz/easycom-rs"
+documentation = "https://docs.rs/easycom"
+readme = "README.md"
+keywords = ["easycom", "rotator", "ham-radio", "serial", "gs232"]
+categories = ["embedded", "hardware-support", "no-std"]
+authors = ["Vladimir K <ew1abz@gmail.com>"]
+exclude = ["spec/"]
+
+[features]
+default = ["std"]
+std = []
+alloc = []
+
+[dependencies]
+
+[dev-dependencies]
+serialport = "4"
+
+[[example]]
+name = "serial_home"
+required-features = ["std"]
+
+[[example]]
+name = "tcp_poll"
+required-features = ["std"]
+
+[[example]]
+name = "cli"
+required-features = ["std"]
