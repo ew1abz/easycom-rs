@@ -44,6 +44,7 @@ fn main() {
 
     match session.send(Command::QueryPosition).unwrap() {
         Response::Position { az, el } => println!("AZ={az:03} EL={el:03}"),
+        Response::Status(status) => println!("Status: {status:?}"),
         Response::Error => eprintln!("Device error"),
         Response::Ack => {}
     }
@@ -68,6 +69,7 @@ session.send(Command::AzimuthElevation { az: 0, el: 0 }).unwrap();
 | `Elevation(el)` | `Ennn\r` | Set elevation (0–180°) |
 | `AzimuthElevation { az, el }` | `Wnnn nnn\r` | Set both simultaneously |
 | `QueryPosition` | `C\r` | Query current position |
+| `QueryStatus` | `GS\r` | Query device status |
 | `Stop` | `S\r` | Stop all movement |
 | `KeepAlive` | `?\r` | Keep-alive ping |
 | `Offset { az, el }` | `O±nnn±nnn\r` | Relative move |

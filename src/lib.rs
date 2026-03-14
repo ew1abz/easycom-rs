@@ -15,6 +15,7 @@
 //! let mut session = Session::new(transport);
 //! match session.send(Command::QueryPosition).unwrap() {
 //!     Response::Position { az, el } => println!("AZ={az} EL={el}"),
+//!     Response::Status(status) => println!("status: {status:?}"),
 //!     Response::Ack => println!("ack"),
 //!     Response::Error => println!("device error"),
 //! }
@@ -31,7 +32,7 @@ pub mod framing;
 pub mod session;
 pub mod transport;
 
-pub use command::{Command, Response};
+pub use command::{Command, DeviceStatus, Response};
 pub use error::Error;
 pub use framing::CommandParser;
 pub use session::Session;

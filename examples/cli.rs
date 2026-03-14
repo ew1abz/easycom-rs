@@ -11,6 +11,7 @@
 //!   el <0-180>          Set elevation
 //!   pos <az> <el>       Set azimuth and elevation
 //!   query               Query current position
+//!   status              Query device status
 //!   stop                Stop movement
 //!   keepalive           Send keep-alive ping
 //!   help                Show this help
@@ -91,6 +92,7 @@ where
                 Command::AzimuthElevation { az, el }
             }
             "query" => Command::QueryPosition,
+            "status" => Command::QueryStatus,
             "stop" => Command::Stop,
             "keepalive" => Command::KeepAlive,
             "help" => {
@@ -111,6 +113,7 @@ where
         match session.send(cmd) {
             Ok(Response::Ack) => println!("OK"),
             Ok(Response::Position { az, el }) => println!("AZ={az:03}  EL={el:03}"),
+            Ok(Response::Status(status)) => println!("Status: {status:?}"),
             Ok(Response::Error) => println!("Device error (?)"),
             Err(e) => eprintln!("Error: {e}"),
         }
@@ -132,7 +135,7 @@ fn parse_arg<T: std::str::FromStr>(parts: &[&str], idx: usize, usage: &str) -> T
 
 fn print_help() {
     println!(
-        "Commands: az <n>  el <n>  pos <az> <el>  query  stop  keepalive  help  quit"
+        "Commands: az <n>  el <n>  pos <az> <el>  query  status  stop  keepalive  help  quit"
     );
 }
 

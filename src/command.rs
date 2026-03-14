@@ -11,6 +11,8 @@ pub enum Command {
     AzimuthElevation { az: u16, el: u16 },
     /// Query the current azimuth and elevation position.
     QueryPosition,
+    /// Query the current device status.
+    QueryStatus,
     /// Stop all movement immediately.
     Stop,
     /// Move by a relative offset from the current position.
@@ -26,6 +28,25 @@ pub enum Response {
     Ack,
     /// The current position reported by the device.
     Position { az: u16, el: u16 },
+    /// The current device status.
+    Status(DeviceStatus),
     /// The device reported an error (returned `?`).
     Error,
+}
+
+/// Status codes reported by the device in response to a [`Command::QueryStatus`].
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum DeviceStatus {
+    /// Homed and idle, ready for commands.
+    Idle,
+    /// Currently moving to a target position.
+    Moving,
+    /// Performing homing / calibration sequence.
+    Homing,
+    /// Power-on state, homing not yet performed.
+    NotHomed,
+    /// Azimuth homing failed.
+    HomingAzError,
+    /// Elevation homing failed.
+    HomingElError,
 }

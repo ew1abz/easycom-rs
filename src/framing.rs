@@ -6,15 +6,18 @@
 //! - `W<NNN> <NNN>\r` — set azimuth and elevation (space-separated)
 //! - `C\r`       — query current position
 //! - `S\r`       — stop
+//! - `GS\r`      — query device status
 //!
 //! An optional XOR checksum may be appended as `*XX` (ASCII hex) before `\r`.
 //!
 //! Response formats:
 //! - `AZ=NNN EL=NNN\r` — position response to a `C` query
+//! - `ST=<status>\r`   — status response (`idle`, `moving`, `homing`,
+//!   `not_homed`, `homing_az_error`, `homing_el_error`)
 //! - `+\r` or an empty `\r` — acknowledgement
 //! - `?\r` — device error
 
-use crate::command::{Command, Response};
+use crate::command::{Command, DeviceStatus, Response};
 use crate::error::ParseError;
 
 // ── Encoding ─────────────────────────────────────────────────────────────────
@@ -90,6 +93,12 @@ pub fn encode_into(cmd: &Command, buf: &mut [u8]) -> Result<usize, &'static str>
             buf[0] = b'C';
             buf[1] = b'\r';
             Ok(2)
+        }
+        Command::QueryStatus => {
+            buf[0] = b'G';
+            buf[1] = b'S';
+            buf[2] = b'\r';
+            Ok(3)
         }
         Command::Stop => {
             buf[0] = b'S';
@@ -213,6 +222,11 @@ pub fn decode(input: &[u8]) -> Result<Response, ParseError> {
         return Ok(pos_resp);
     }
 
+    // Status: "ST=<status>"
+    if let Some(status_resp) = try_parse_status(payload) {
+        return Ok(status_resp);
+    }
+
     Err(ParseError::UnknownCommand)
 }
 
@@ -236,6 +250,39 @@ fn parse_labeled_value(s: &str, label: &str) -> Option<u16> {
     digits.parse().ok()
 }
 
+/// Attempt to parse `ST=<status>`.
+fn try_parse_status(data: &[u8]) -> Option<Response> {
+    let s = core::str::from_utf8(data).ok()?;
+    let value = s.strip_prefix("ST=")?;
+    let status = status_from_str(value)?;
+    Some(Response::Status(status))
+}
+
+/// Map a status string to a [`DeviceStatus`] variant.
+fn status_from_str(s: &str) -> Option<DeviceStatus> {
+    match s {
+        "idle" => Some(DeviceStatus::Idle),
+        "moving" => Some(DeviceStatus::Moving),
+        "homing" => Some(DeviceStatus::Homing),
+        "not_homed" => Some(DeviceStatus::NotHomed),
+        "homing_az_error" => Some(DeviceStatus::HomingAzError),
+        "homing_el_error" => Some(DeviceStatus::HomingElError),
+        _ => None,
+    }
+}
+
+/// Return the wire-format string for a [`DeviceStatus`].
+fn status_to_str(status: &DeviceStatus) -> &'static str {
+    match status {
+        DeviceStatus::Idle => "idle",
+        DeviceStatus::Moving => "moving",
+        DeviceStatus::Homing => "homing",
+        DeviceStatus::NotHomed => "not_homed",
+        DeviceStatus::HomingAzError => "homing_az_error",
+        DeviceStatus::HomingElError => "homing_el_error",
+    }
+}
+
 fn parse_hex_nibble(b: u8) -> Option<u8> {
     match b {
         b'0'..=b'9' => Some(b - b'0'),
@@ -253,9 +300,10 @@ fn parse_hex_nibble(b: u8) -> Option<u8> {
 ///
 /// | Response          | Frame             | Bytes |
 /// |-------------------|-------------------|-------|
-/// | `Ack`             | `+\r`             | 2     |
-/// | `Error`           | `?\r`             | 2     |
-/// | `Position{az,el}` | `AZ=NNN EL=NNN\r` | 14    |
+/// | `Ack`             | `+\r`              | 2     |
+/// | `Error`           | `?\r`              | 2     |
+/// | `Position{az,el}` | `AZ=NNN EL=NNN\r`  | 14    |
+/// | `Status(s)`       | `ST=<status>\r`     | 5–19  |
 pub fn encode_response_into(resp: &Response, buf: &mut [u8]) -> usize {
     match resp {
         Response::Ack => {
@@ -281,6 +329,15 @@ pub fn encode_response_into(resp: &Response, buf: &mut [u8]) -> usize {
             write_3digits(buf, 10, *el);
             buf[13] = b'\r';
             14
+        }
+        Response::Status(status) => {
+            // "ST=<status>\r"
+            let prefix = b"ST=";
+            buf[..3].copy_from_slice(prefix);
+            let value = status_to_str(status).as_bytes();
+            buf[3..3 + value.len()].copy_from_slice(value);
+            buf[3 + value.len()] = b'\r';
+            4 + value.len()
         }
     }
 }
@@ -346,6 +403,7 @@ pub fn decode_command(frame: &[u8]) -> Option<Command> {
     match frame {
         [] => None,
         [b'C'] => Some(Command::QueryPosition),
+        [b'G', b'S'] => Some(Command::QueryStatus),
         [b'S'] => Some(Command::Stop),
         [b'?'] => Some(Command::KeepAlive),
         [b'A', d0, d1, d2] => parse_u16_3digit(*d0, *d1, *d2)
@@ -472,7 +530,7 @@ impl Default for Parser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{Command, Response};
+    use crate::command::{Command, DeviceStatus, Response};
 
     // ── encode helpers ────────────────────────────────────────────────────────
 
@@ -681,6 +739,74 @@ mod tests {
             result = p.feed(b);
         }
         assert_eq!(result, Some(Command::Azimuth(90)));
+    }
+
+    // ── status tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn encode_query_status() {
+        assert_eq!(enc(&Command::QueryStatus), b"GS\r");
+    }
+
+    #[test]
+    fn decode_status_idle() {
+        assert_eq!(decode(b"ST=idle\r").unwrap(), Response::Status(DeviceStatus::Idle));
+    }
+
+    #[test]
+    fn decode_status_moving() {
+        assert_eq!(decode(b"ST=moving\r").unwrap(), Response::Status(DeviceStatus::Moving));
+    }
+
+    #[test]
+    fn decode_status_homing() {
+        assert_eq!(decode(b"ST=homing\r").unwrap(), Response::Status(DeviceStatus::Homing));
+    }
+
+    #[test]
+    fn decode_status_not_homed() {
+        assert_eq!(decode(b"ST=not_homed\r").unwrap(), Response::Status(DeviceStatus::NotHomed));
+    }
+
+    #[test]
+    fn decode_status_homing_az_error() {
+        assert_eq!(
+            decode(b"ST=homing_az_error\r").unwrap(),
+            Response::Status(DeviceStatus::HomingAzError)
+        );
+    }
+
+    #[test]
+    fn decode_status_homing_el_error() {
+        assert_eq!(
+            decode(b"ST=homing_el_error\r").unwrap(),
+            Response::Status(DeviceStatus::HomingElError)
+        );
+    }
+
+    #[test]
+    fn decode_status_unknown() {
+        assert_eq!(decode(b"ST=bogus\r"), Err(ParseError::UnknownCommand));
+    }
+
+    #[test]
+    fn encode_response_status() {
+        let mut buf = [0u8; 32];
+        let n = encode_response_into(&Response::Status(DeviceStatus::HomingAzError), &mut buf);
+        assert_eq!(&buf[..n], b"ST=homing_az_error\r");
+    }
+
+    #[test]
+    fn decode_command_query_status() {
+        assert_eq!(decode_command(b"GS"), Some(Command::QueryStatus));
+    }
+
+    #[test]
+    fn round_trip_status_response() {
+        let resp = Response::Status(DeviceStatus::Idle);
+        let mut buf = [0u8; 32];
+        let n = encode_response_into(&resp, &mut buf);
+        assert_eq!(decode(&buf[..n]).unwrap(), resp);
     }
 
     // ── Parser tests ──────────────────────────────────────────────────────────
