@@ -1,7 +1,7 @@
 # easycom
 
 A Rust library implementing the **Easycom** antenna rotator control protocol,
-a variant of the Yaesu GS-232A/B standard.
+supporting the Yaesu GS-232A/B command set, Easycomm II, and Easycomm III.
 
 Works on `std` targets (desktop, server) and `no_std` targets (embedded firmware).
 
@@ -45,6 +45,11 @@ fn main() {
     match session.send(Command::QueryPosition).unwrap() {
         Response::Position { az, el } => println!("AZ={az:03} EL={el:03}"),
         Response::Status(status) => println!("Status: {status:?}"),
+        Response::StatusRegister(val) => println!("Status register: {val}"),
+        Response::ErrorRegister(val) => println!("Error register: {val}"),
+        Response::ConfigValue { register, value } => println!("CR{register}={value}"),
+        Response::AzimuthPosition(az) => println!("AZ={az:03}"),
+        Response::ElevationPosition(el) => println!("EL={el:03}"),
         Response::Error => eprintln!("Device error"),
         Response::Ack => {}
     }
@@ -61,7 +66,12 @@ session.send(Command::Stop).unwrap();
 session.send(Command::AzimuthElevation { az: 0, el: 0 }).unwrap();
 ```
 
-## Commands
+## Supported protocols
+
+The library understands three wire protocols and accepts commands from any of
+them interchangeably. Responses are encoded in the format matching the original query.
+
+### GS-232A/B (Yaesu)
 
 | Variant | Wire frame | Description |
 |---|---|---|
@@ -69,10 +79,41 @@ session.send(Command::AzimuthElevation { az: 0, el: 0 }).unwrap();
 | `Elevation(el)` | `Ennn\r` | Set elevation (0–180°) |
 | `AzimuthElevation { az, el }` | `Wnnn nnn\r` | Set both simultaneously |
 | `QueryPosition` | `C\r` | Query current position |
-| `QueryStatus` | `GS\r` | Query device status |
+| `QueryStatus` | `GS\r` | Query device status (returns `ST=…`) |
 | `Stop` | `S\r` | Stop all movement |
 | `KeepAlive` | `?\r` | Keep-alive ping |
 | `Offset { az, el }` | `O±nnn±nnn\r` | Relative move |
+
+### Easycomm II
+
+| Variant | Wire frame | Description |
+|---|---|---|
+| `Azimuth(az)` | `AZnnn.n\n` | Set azimuth (0–360°) |
+| `Elevation(el)` | `ELnnn.n\n` | Set elevation (0–180°) |
+| `AzimuthElevation { az, el }` | `AZnnn.n ELnnn.n\n` | Set both simultaneously |
+| `QueryAzimuth` | `AZ\n` | Query current azimuth |
+| `QueryElevation` | `EL\n` | Query current elevation |
+| `Stop` | `SA SE\n` | Stop all axes |
+
+Easycomm II is the protocol used by **hamlib** (`rotctl -m 204`).
+
+### Easycomm III
+
+| Variant | Wire frame | Description |
+|---|---|---|
+| `VelocityLeft(speed)` | `VL<speed>\n` | Velocity left (mdeg/s) |
+| `VelocityRight(speed)` | `VR<speed>\n` | Velocity right (mdeg/s) |
+| `VelocityUp(speed)` | `VU<speed>\n` | Velocity up (mdeg/s) |
+| `VelocityDown(speed)` | `VD<speed>\n` | Velocity down (mdeg/s) |
+| `GetStatusRegister` | `GS\n` | Get status register (bitmask) |
+| `GetErrorRegister` | `GE\n` | Get error register (bitmask) |
+| `ReadConfig(reg)` | `CR<reg>\n` | Read configuration register |
+| `WriteConfig { register, value }` | `CW<reg>,<val>\n` | Write configuration register |
+| `Reset` | `RESET\n` | Reset device |
+| `Park` | `PARK\n` | Move to park position |
+
+Easycomm III extends II with velocity control, device status/error registers,
+and configuration read/write. Used by **SatNOGS** rotator firmware.
 
 ## Feature flags
 

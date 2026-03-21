@@ -175,4 +175,41 @@ mod tests {
         let err = session.send(Command::QueryPosition).unwrap_err();
         assert!(matches!(err, Error::Timeout));
     }
+
+    #[test]
+    fn session_query_azimuth() {
+        let mut mock = MockTransport::new();
+        mock.enqueue_response(b"AZ270.0\n".to_vec());
+
+        let mut session = Session::new(mock);
+        let resp = session.send(Command::QueryAzimuth).unwrap();
+        assert_eq!(resp, Response::AzimuthPosition(270));
+
+        let t = session.into_transport();
+        assert_eq!(&t.written, b"AZ\r");
+    }
+
+    #[test]
+    fn session_query_elevation() {
+        let mut mock = MockTransport::new();
+        mock.enqueue_response(b"EL045.0\n".to_vec());
+
+        let mut session = Session::new(mock);
+        let resp = session.send(Command::QueryElevation).unwrap();
+        assert_eq!(resp, Response::ElevationPosition(45));
+
+        let t = session.into_transport();
+        assert_eq!(&t.written, b"EL\r");
+    }
+
+    #[test]
+    fn session_query_azimuth_echo_suppression() {
+        let mut mock = MockTransport::new();
+        // Device echoes "AZ\r" before the real response.
+        mock.enqueue_response(b"AZ\rAZ270.0\n".to_vec());
+
+        let mut session = Session::new(mock);
+        let resp = session.send(Command::QueryAzimuth).unwrap();
+        assert_eq!(resp, Response::AzimuthPosition(270));
+    }
 }

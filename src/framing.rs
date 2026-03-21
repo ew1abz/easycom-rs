@@ -1,19 +1,43 @@
 //! Frame encoding and decoding for the Easycom protocol.
 //!
-//! Encoding rules (GS-232A/B compatible):
+//! Supports GS-232A/B, Easycomm II, and Easycomm III command formats:
+//!
+//! GS-232 commands:
 //! - `A<NNN>\r`  — set azimuth, 3 zero-padded decimal digits
 //! - `E<NNN>\r`  — set elevation, 3 zero-padded decimal digits
 //! - `W<NNN> <NNN>\r` — set azimuth and elevation (space-separated)
-//! - `C\r`       — query current position
+//! - `C\r`       — query current position (both axes)
 //! - `S\r`       — stop
-//! - `GS\r`      — query device status
+//!
+//! Easycomm II commands:
+//! - `AZ\r`      — query azimuth
+//! - `EL\r`      — query elevation
+//! - `AZnnn.n\r` — set azimuth (decimal degrees)
+//! - `ELnnn.n\r` — set elevation (decimal degrees)
+//! - `AZnnn.n ELnnn.n\r` — set both axes
+//! - `SA SE\r`   — stop all axes
+//!
+//! Easycomm III commands:
+//! - `VL<speed>\r` / `VR<speed>\r` — velocity left/right (mdeg/s)
+//! - `VU<speed>\r` / `VD<speed>\r` — velocity up/down (mdeg/s)
+//! - `GS\r`      — get status register (bitmask)
+//! - `GE\r`      — get error register (bitmask)
+//! - `CR<reg>\r` — read configuration register
+//! - `CW<reg>,<val>\r` — write configuration register
+//! - `RESET\r`   — reset device
+//! - `PARK\r`    — move to park position
 //!
 //! An optional XOR checksum may be appended as `*XX` (ASCII hex) before `\r`.
 //!
 //! Response formats:
 //! - `AZ=NNN EL=NNN\r` — position response to a `C` query
+//! - `AZ=NNN.N\r`      — azimuth-only response (Easycomm II)
+//! - `EL=NNN.N\r`      — elevation-only response (Easycomm II)
 //! - `ST=<status>\r`   — status response (`idle`, `moving`, `homing`,
 //!   `not_homed`, `homing_az_error`, `homing_el_error`)
+//! - `GS<val>\n`       — status register bitmask (Easycomm III)
+//! - `GE<val>\n`       — error register bitmask (Easycomm III)
+//! - `CR<reg>,<val>\n` — configuration register value (Easycomm III)
 //! - `+\r` or an empty `\r` — acknowledgement
 //! - `?\r` — device error
 
@@ -94,6 +118,18 @@ pub fn encode_into(cmd: &Command, buf: &mut [u8]) -> Result<usize, &'static str>
             buf[1] = b'\r';
             Ok(2)
         }
+        Command::QueryAzimuth => {
+            buf[0] = b'A';
+            buf[1] = b'Z';
+            buf[2] = b'\r';
+            Ok(3)
+        }
+        Command::QueryElevation => {
+            buf[0] = b'E';
+            buf[1] = b'L';
+            buf[2] = b'\r';
+            Ok(3)
+        }
         Command::QueryStatus => {
             buf[0] = b'G';
             buf[1] = b'S';
@@ -117,6 +153,44 @@ pub fn encode_into(cmd: &Command, buf: &mut [u8]) -> Result<usize, &'static str>
             let pos = write_signed_3digits(buf, pos, *el);
             buf[pos] = b'\r';
             Ok(pos + 1)
+        }
+        Command::VelocityLeft(speed) => write_velocity_cmd(buf, b"VL", *speed),
+        Command::VelocityRight(speed) => write_velocity_cmd(buf, b"VR", *speed),
+        Command::VelocityUp(speed) => write_velocity_cmd(buf, b"VU", *speed),
+        Command::VelocityDown(speed) => write_velocity_cmd(buf, b"VD", *speed),
+        Command::GetStatusRegister => {
+            buf[..2].copy_from_slice(b"GS");
+            buf[2] = b'\r';
+            Ok(3)
+        }
+        Command::GetErrorRegister => {
+            buf[..2].copy_from_slice(b"GE");
+            buf[2] = b'\r';
+            Ok(3)
+        }
+        Command::ReadConfig(reg) => {
+            buf[..2].copy_from_slice(b"CR");
+            let pos = write_u32(buf, 2, *reg as u32);
+            buf[pos] = b'\r';
+            Ok(pos + 1)
+        }
+        Command::WriteConfig { register, value } => {
+            buf[..2].copy_from_slice(b"CW");
+            let pos = write_u32(buf, 2, *register as u32);
+            buf[pos] = b',';
+            let pos = write_i32(buf, pos + 1, *value);
+            buf[pos] = b'\r';
+            Ok(pos + 1)
+        }
+        Command::Reset => {
+            buf[..5].copy_from_slice(b"RESET");
+            buf[5] = b'\r';
+            Ok(6)
+        }
+        Command::Park => {
+            buf[..4].copy_from_slice(b"PARK");
+            buf[4] = b'\r';
+            Ok(5)
         }
     }
 }
@@ -156,6 +230,46 @@ fn format_cmd_3digit(letter: u8, value: u16, buf: &mut [u8]) -> usize {
     write_3digits(buf, 1, value);
     buf[4] = b'\r';
     5
+}
+
+/// Write an unsigned 32-bit integer as decimal digits at `buf[pos..]`.
+/// Returns the new position.
+fn write_u32(buf: &mut [u8], pos: usize, mut n: u32) -> usize {
+    if n == 0 {
+        buf[pos] = b'0';
+        return pos + 1;
+    }
+    let mut digits = [0u8; 10];
+    let mut len = 0;
+    while n > 0 {
+        digits[len] = b'0' + (n % 10) as u8;
+        n /= 10;
+        len += 1;
+    }
+    for i in 0..len {
+        buf[pos + i] = digits[len - 1 - i];
+    }
+    pos + len
+}
+
+/// Write a signed 32-bit integer as decimal digits (with leading `-`) at `buf[pos..]`.
+/// Returns the new position.
+fn write_i32(buf: &mut [u8], pos: usize, n: i32) -> usize {
+    if n < 0 {
+        buf[pos] = b'-';
+        write_u32(buf, pos + 1, n.unsigned_abs())
+    } else {
+        write_u32(buf, pos, n as u32)
+    }
+}
+
+/// Encode a velocity command: `<prefix><speed>\r`.
+fn write_velocity_cmd(buf: &mut [u8], prefix: &[u8; 2], speed: u32) -> Result<usize, &'static str> {
+    buf[0] = prefix[0];
+    buf[1] = prefix[1];
+    let pos = write_u32(buf, 2, speed);
+    buf[pos] = b'\r';
+    Ok(pos + 1)
 }
 
 // ── Decoding ──────────────────────────────────────────────────────────────────
@@ -222,9 +336,19 @@ pub fn decode(input: &[u8]) -> Result<Response, ParseError> {
         return Ok(pos_resp);
     }
 
+    // Single-axis position: "AZ=NNN.N" or "EL=NNN.N"
+    if let Some(axis_resp) = try_parse_single_axis(payload) {
+        return Ok(axis_resp);
+    }
+
     // Status: "ST=<status>"
     if let Some(status_resp) = try_parse_status(payload) {
         return Ok(status_resp);
+    }
+
+    // Easycomm III registers: "GS<val>", "GE<val>", "CR<reg>,<val>"
+    if let Some(reg_resp) = try_parse_register(payload) {
+        return Ok(reg_resp);
     }
 
     Err(ParseError::UnknownCommand)
@@ -250,6 +374,32 @@ fn parse_labeled_value(s: &str, label: &str) -> Option<u16> {
     digits.parse().ok()
 }
 
+/// Attempt to parse a single-axis position: `AZNNN.N` or `ELNNN.N` (with or without `=`).
+fn try_parse_single_axis(data: &[u8]) -> Option<Response> {
+    let s = core::str::from_utf8(data).ok()?;
+    // Accept both "AZ=NNN.N" and "AZNNN.N"
+    if let Some(rest) = s.strip_prefix("AZ") {
+        let val = rest.strip_prefix('=').unwrap_or(rest);
+        let deg = parse_float_u16(val)?;
+        return Some(Response::AzimuthPosition(deg));
+    }
+    if let Some(rest) = s.strip_prefix("EL") {
+        let val = rest.strip_prefix('=').unwrap_or(rest);
+        let deg = parse_float_u16(val)?;
+        return Some(Response::ElevationPosition(deg));
+    }
+    None
+}
+
+/// Parse a decimal number (possibly with fractional part) and truncate to u16.
+fn parse_float_u16(s: &str) -> Option<u16> {
+    if s.is_empty() {
+        return None;
+    }
+    let int_part = if let Some(dot) = s.find('.') { &s[..dot] } else { s };
+    int_part.parse().ok()
+}
+
 /// Attempt to parse `ST=<status>`.
 fn try_parse_status(data: &[u8]) -> Option<Response> {
     let s = core::str::from_utf8(data).ok()?;
@@ -269,6 +419,26 @@ fn status_from_str(s: &str) -> Option<DeviceStatus> {
         "homing_el_error" => Some(DeviceStatus::HomingElError),
         _ => None,
     }
+}
+
+/// Attempt to parse Easycomm III register responses: `GS<val>`, `GE<val>`, `CR<reg>,<val>`.
+fn try_parse_register(data: &[u8]) -> Option<Response> {
+    let s = core::str::from_utf8(data).ok()?;
+    if let Some(val) = s.strip_prefix("GS") {
+        let v: u16 = val.parse().ok()?;
+        return Some(Response::StatusRegister(v));
+    }
+    if let Some(val) = s.strip_prefix("GE") {
+        let v: u16 = val.parse().ok()?;
+        return Some(Response::ErrorRegister(v));
+    }
+    if let Some(rest) = s.strip_prefix("CR") {
+        let comma = rest.find(',')?;
+        let reg: u16 = rest[..comma].parse().ok()?;
+        let val: i32 = rest[comma + 1..].parse().ok()?;
+        return Some(Response::ConfigValue { register: reg, value: val });
+    }
+    None
 }
 
 /// Return the wire-format string for a [`DeviceStatus`].
@@ -296,14 +466,7 @@ fn parse_hex_nibble(b: u8) -> Option<u8> {
 
 /// Encode a [`Response`] into `buf` (no-std / fixed-buffer variant).
 ///
-/// Returns the number of bytes written.  `buf` must be at least 16 bytes.
-///
-/// | Response          | Frame             | Bytes |
-/// |-------------------|-------------------|-------|
-/// | `Ack`             | `+\r`              | 2     |
-/// | `Error`           | `?\r`              | 2     |
-/// | `Position{az,el}` | `AZ=NNN EL=NNN\r`  | 14    |
-/// | `Status(s)`       | `ST=<status>\r`     | 5–19  |
+/// Returns the number of bytes written.  `buf` must be at least 32 bytes.
 pub fn encode_response_into(resp: &Response, buf: &mut [u8]) -> usize {
     match resp {
         Response::Ack => {
@@ -330,6 +493,26 @@ pub fn encode_response_into(resp: &Response, buf: &mut [u8]) -> usize {
             buf[13] = b'\r';
             14
         }
+        Response::AzimuthPosition(az) => {
+            // "AZNNN.0\n" — 8 bytes (Easycomm II, no '=')
+            buf[0] = b'A';
+            buf[1] = b'Z';
+            write_3digits(buf, 2, *az);
+            buf[5] = b'.';
+            buf[6] = b'0';
+            buf[7] = b'\n';
+            8
+        }
+        Response::ElevationPosition(el) => {
+            // "ELNNN.0\n" — 8 bytes (Easycomm II, no '=')
+            buf[0] = b'E';
+            buf[1] = b'L';
+            write_3digits(buf, 2, *el);
+            buf[5] = b'.';
+            buf[6] = b'0';
+            buf[7] = b'\n';
+            8
+        }
         Response::Status(status) => {
             // "ST=<status>\r"
             let prefix = b"ST=";
@@ -339,14 +522,40 @@ pub fn encode_response_into(resp: &Response, buf: &mut [u8]) -> usize {
             buf[3 + value.len()] = b'\r';
             4 + value.len()
         }
+        Response::StatusRegister(val) => {
+            // "GS<val>\n"
+            buf[0] = b'G';
+            buf[1] = b'S';
+            let pos = write_u32(buf, 2, *val as u32);
+            buf[pos] = b'\n';
+            pos + 1
+        }
+        Response::ErrorRegister(val) => {
+            // "GE<val>\n"
+            buf[0] = b'G';
+            buf[1] = b'E';
+            let pos = write_u32(buf, 2, *val as u32);
+            buf[pos] = b'\n';
+            pos + 1
+        }
+        Response::ConfigValue { register, value } => {
+            // "CR<reg>,<val>\n"
+            buf[0] = b'C';
+            buf[1] = b'R';
+            let pos = write_u32(buf, 2, *register as u32);
+            buf[pos] = b',';
+            let pos = write_i32(buf, pos + 1, *value);
+            buf[pos] = b'\n';
+            pos + 1
+        }
     }
 }
 
 // ── Device-side command parsing ───────────────────────────────────────────────
 
 /// Maximum raw command frame length (bytes before the trailing `\r`).
-/// Longest command: `O+360-180` = 9 bytes; 16 leaves headroom.
-const MAX_CMD_FRAME: usize = 16;
+/// Longest command: `CW65535,-2147483648` = 19 bytes; 32 leaves headroom.
+const MAX_CMD_FRAME: usize = 32;
 
 /// Byte-by-byte accumulator that parses incoming *host commands* from frames
 /// terminated with `\r`.
@@ -397,43 +606,156 @@ impl Default for CommandParser {
 
 /// Parse a raw frame (bytes *before* the `\r`) as an Easycom host command.
 ///
+/// Supports GS-232 fixed-length commands, Easycomm II, and Easycomm III
+/// variable-length commands.
+///
 /// Returns `None` for unknown or out-of-range frames.
 pub fn decode_command(frame: &[u8]) -> Option<Command> {
     let frame = strip_cmd_checksum(frame);
+
+    // Exact-match commands (unambiguous, checked first).
     match frame {
-        [] => None,
-        [b'C'] => Some(Command::QueryPosition),
-        [b'G', b'S'] => Some(Command::QueryStatus),
-        [b'S'] => Some(Command::Stop),
-        [b'?'] => Some(Command::KeepAlive),
-        [b'A', d0, d1, d2] => parse_u16_3digit(*d0, *d1, *d2)
-            .filter(|&az| az <= 360)
-            .map(Command::Azimuth),
-        [b'E', d0, d1, d2] => parse_u16_3digit(*d0, *d1, *d2)
-            .filter(|&el| el <= 180)
-            .map(Command::Elevation),
+        [] => return None,
+        [b'C'] => return Some(Command::QueryPosition),
+        [b'S'] => return Some(Command::Stop),
+        [b'?'] => return Some(Command::KeepAlive),
+        [b'G', b'S'] => return Some(Command::GetStatusRegister),
+        [b'G', b'E'] => return Some(Command::GetErrorRegister),
+        [b'A', b'Z'] => return Some(Command::QueryAzimuth),
+        [b'E', b'L'] => return Some(Command::QueryElevation),
+        _ => {}
+    }
+
+    // GS-232 fixed-length patterns.
+    match frame {
+        [b'A', d0, d1, d2] => {
+            if let Some(cmd) = parse_u16_3digit(*d0, *d1, *d2)
+                .filter(|&az| az <= 360)
+                .map(Command::Azimuth)
+            {
+                return Some(cmd);
+            }
+        }
+        [b'E', d0, d1, d2] => {
+            if let Some(cmd) = parse_u16_3digit(*d0, *d1, *d2)
+                .filter(|&el| el <= 180)
+                .map(Command::Elevation)
+            {
+                return Some(cmd);
+            }
+        }
         [b'W', a0, a1, a2, b' ', e0, e1, e2] => {
-            let az = parse_u16_3digit(*a0, *a1, *a2).filter(|&v| v <= 360)?;
-            let el = parse_u16_3digit(*e0, *e1, *e2).filter(|&v| v <= 180)?;
-            Some(Command::AzimuthElevation { az, el })
+            let az = parse_u16_3digit(*a0, *a1, *a2).filter(|&v| v <= 360);
+            let el = parse_u16_3digit(*e0, *e1, *e2).filter(|&v| v <= 180);
+            if let (Some(az), Some(el)) = (az, el) {
+                return Some(Command::AzimuthElevation { az, el });
+            }
         }
         [b'O', s1, a0, a1, a2, s2, e0, e1, e2] => {
-            let az = parse_signed_3digit(*s1, *a0, *a1, *a2)?;
-            let el = parse_signed_3digit(*s2, *e0, *e1, *e2)?;
-            Some(Command::Offset { az, el })
+            if let (Some(az), Some(el)) = (
+                parse_signed_3digit(*s1, *a0, *a1, *a2),
+                parse_signed_3digit(*s2, *e0, *e1, *e2),
+            ) {
+                return Some(Command::Offset { az, el });
+            }
         }
-        _ => None,
+        _ => {}
     }
+
+    // Easycomm II/III variable-length patterns.
+    try_parse_easycomm(frame)
+}
+
+/// Parse Easycomm II/III variable-length commands.
+fn try_parse_easycomm(frame: &[u8]) -> Option<Command> {
+    let s = core::str::from_utf8(frame).ok()?;
+
+    // Multi-character keywords.
+    if s == "RESET" {
+        return Some(Command::Reset);
+    }
+    if s == "PARK" {
+        return Some(Command::Park);
+    }
+
+    // Stop variants: SA SE, SA, SE
+    if s == "SA SE" || s == "SA" || s == "SE" {
+        return Some(Command::Stop);
+    }
+
+    // Velocity commands: VL/VR/VU/VD<speed>
+    if let Some(val) = s.strip_prefix("VL") {
+        return val.parse().ok().map(Command::VelocityLeft);
+    }
+    if let Some(val) = s.strip_prefix("VR") {
+        return val.parse().ok().map(Command::VelocityRight);
+    }
+    if let Some(val) = s.strip_prefix("VU") {
+        return val.parse().ok().map(Command::VelocityUp);
+    }
+    if let Some(val) = s.strip_prefix("VD") {
+        return val.parse().ok().map(Command::VelocityDown);
+    }
+
+    // Config write: CW<reg>,<val>
+    if let Some(rest) = s.strip_prefix("CW") {
+        let comma = rest.find(',')?;
+        let reg: u16 = rest[..comma].parse().ok()?;
+        let val: i32 = rest[comma + 1..].parse().ok()?;
+        return Some(Command::WriteConfig { register: reg, value: val });
+    }
+
+    // Config read: CR<reg>
+    if let Some(rest) = s.strip_prefix("CR") {
+        let reg: u16 = rest.parse().ok()?;
+        return Some(Command::ReadConfig(reg));
+    }
+
+    // Status register with value: GS<val> (bare GS handled in exact match)
+    if let Some(val) = s.strip_prefix("GS")
+        && !val.is_empty()
+    {
+        return Some(Command::GetStatusRegister);
+    }
+
+    // Combined set: "AZnnn.n ELnnn.n"
+    if let Some(space_idx) = s.find(' ') {
+        let left = &s[..space_idx];
+        let right = &s[space_idx + 1..];
+        if let (Some(az), Some(el)) = (
+            left.strip_prefix("AZ").and_then(parse_float_u16),
+            right.strip_prefix("EL").and_then(parse_float_u16),
+        )
+            && az <= 360 && el <= 180
+        {
+            return Some(Command::AzimuthElevation { az, el });
+        }
+    }
+
+    // Single-axis set: "AZnnn.n" or "ELnnn.n"
+    if let Some(val) = s.strip_prefix("AZ") {
+        let az = parse_float_u16(val)?;
+        if az <= 360 {
+            return Some(Command::Azimuth(az));
+        }
+    }
+    if let Some(val) = s.strip_prefix("EL") {
+        let el = parse_float_u16(val)?;
+        if el <= 180 {
+            return Some(Command::Elevation(el));
+        }
+    }
+
+    None
 }
 
 /// Strip an optional `*XX` XOR-checksum suffix from a command frame.
 fn strip_cmd_checksum(frame: &[u8]) -> &[u8] {
-    if frame.len() >= 3 {
-        if let Some(pos) = frame.iter().rposition(|&b| b == b'*') {
-            if pos + 3 <= frame.len() {
-                return &frame[..pos];
-            }
-        }
+    if frame.len() >= 3
+        && let Some(pos) = frame.iter().rposition(|&b| b == b'*')
+        && pos + 3 <= frame.len()
+    {
+        return &frame[..pos];
     }
     frame
 }
@@ -564,6 +886,16 @@ mod tests {
     }
 
     #[test]
+    fn encode_query_azimuth() {
+        assert_eq!(enc(&Command::QueryAzimuth), b"AZ\r");
+    }
+
+    #[test]
+    fn encode_query_elevation() {
+        assert_eq!(enc(&Command::QueryElevation), b"EL\r");
+    }
+
+    #[test]
     fn encode_stop() {
         assert_eq!(enc(&Command::Stop), b"S\r");
     }
@@ -677,6 +1009,20 @@ mod tests {
         assert_eq!(&buf[..n], b"AZ=270 EL=045\r");
     }
 
+    #[test]
+    fn encode_response_azimuth_position() {
+        let mut buf = [0u8; 16];
+        let n = encode_response_into(&Response::AzimuthPosition(270), &mut buf);
+        assert_eq!(&buf[..n], b"AZ270.0\n");
+    }
+
+    #[test]
+    fn encode_response_elevation_position() {
+        let mut buf = [0u8; 16];
+        let n = encode_response_into(&Response::ElevationPosition(45), &mut buf);
+        assert_eq!(&buf[..n], b"EL045.0\n");
+    }
+
     // ── decode_command tests ──────────────────────────────────────────────────
 
     #[test]
@@ -728,6 +1074,226 @@ mod tests {
     fn decode_command_strips_checksum() {
         // "C*43" — checksum stripped, then decoded as QueryPosition
         assert_eq!(decode_command(b"C*43"), Some(Command::QueryPosition));
+    }
+
+    // ── Easycomm II command tests ─────────────────────────────────────────────
+
+    #[test]
+    fn decode_command_query_azimuth() {
+        assert_eq!(decode_command(b"AZ"), Some(Command::QueryAzimuth));
+    }
+
+    #[test]
+    fn decode_command_query_elevation() {
+        assert_eq!(decode_command(b"EL"), Some(Command::QueryElevation));
+    }
+
+    #[test]
+    fn decode_command_easycomm2_set_azimuth() {
+        assert_eq!(decode_command(b"AZ180.0"), Some(Command::Azimuth(180)));
+        assert_eq!(decode_command(b"AZ45"), Some(Command::Azimuth(45)));
+        assert_eq!(decode_command(b"AZ361.0"), None); // out of range
+    }
+
+    #[test]
+    fn decode_command_easycomm2_set_elevation() {
+        assert_eq!(decode_command(b"EL90.0"), Some(Command::Elevation(90)));
+        assert_eq!(decode_command(b"EL45"), Some(Command::Elevation(45)));
+        assert_eq!(decode_command(b"EL181.0"), None);
+    }
+
+    #[test]
+    fn decode_command_easycomm2_set_both() {
+        assert_eq!(
+            decode_command(b"AZ180.0 EL90.0"),
+            Some(Command::AzimuthElevation { az: 180, el: 90 })
+        );
+    }
+
+    #[test]
+    fn decode_command_easycomm2_stop() {
+        assert_eq!(decode_command(b"SA SE"), Some(Command::Stop));
+        assert_eq!(decode_command(b"SA"), Some(Command::Stop));
+        assert_eq!(decode_command(b"SE"), Some(Command::Stop));
+    }
+
+    // ── decode response tests (single-axis) ───────────────────────────────────
+
+    #[test]
+    fn decode_azimuth_position() {
+        assert_eq!(
+            decode(b"AZ=270.0\r").unwrap(),
+            Response::AzimuthPosition(270)
+        );
+    }
+
+    #[test]
+    fn decode_elevation_position() {
+        assert_eq!(
+            decode(b"EL=045.0\r").unwrap(),
+            Response::ElevationPosition(45)
+        );
+    }
+
+    // ── Easycomm III encode tests ────────────────────────────────────────────
+
+    #[test]
+    fn encode_velocity_left() {
+        assert_eq!(enc(&Command::VelocityLeft(100)), b"VL100\r");
+    }
+
+    #[test]
+    fn encode_velocity_right() {
+        assert_eq!(enc(&Command::VelocityRight(0)), b"VR0\r");
+    }
+
+    #[test]
+    fn encode_velocity_up() {
+        assert_eq!(enc(&Command::VelocityUp(5000)), b"VU5000\r");
+    }
+
+    #[test]
+    fn encode_velocity_down() {
+        assert_eq!(enc(&Command::VelocityDown(250)), b"VD250\r");
+    }
+
+    #[test]
+    fn encode_get_status_register() {
+        assert_eq!(enc(&Command::GetStatusRegister), b"GS\r");
+    }
+
+    #[test]
+    fn encode_get_error_register() {
+        assert_eq!(enc(&Command::GetErrorRegister), b"GE\r");
+    }
+
+    #[test]
+    fn encode_read_config() {
+        assert_eq!(enc(&Command::ReadConfig(0)), b"CR0\r");
+        assert_eq!(enc(&Command::ReadConfig(5)), b"CR5\r");
+    }
+
+    #[test]
+    fn encode_write_config() {
+        assert_eq!(enc(&Command::WriteConfig { register: 0, value: 1000 }), b"CW0,1000\r");
+        assert_eq!(enc(&Command::WriteConfig { register: 3, value: -50 }), b"CW3,-50\r");
+    }
+
+    #[test]
+    fn encode_reset() {
+        assert_eq!(enc(&Command::Reset), b"RESET\r");
+    }
+
+    #[test]
+    fn encode_park() {
+        assert_eq!(enc(&Command::Park), b"PARK\r");
+    }
+
+    // ── Easycomm III decode command tests ─────────────────────────────────────
+
+    #[test]
+    fn decode_command_get_status_register() {
+        assert_eq!(decode_command(b"GS"), Some(Command::GetStatusRegister));
+    }
+
+    #[test]
+    fn decode_command_get_error_register() {
+        assert_eq!(decode_command(b"GE"), Some(Command::GetErrorRegister));
+    }
+
+    #[test]
+    fn decode_command_velocity_left() {
+        assert_eq!(decode_command(b"VL100"), Some(Command::VelocityLeft(100)));
+    }
+
+    #[test]
+    fn decode_command_velocity_right() {
+        assert_eq!(decode_command(b"VR0"), Some(Command::VelocityRight(0)));
+    }
+
+    #[test]
+    fn decode_command_velocity_up() {
+        assert_eq!(decode_command(b"VU5000"), Some(Command::VelocityUp(5000)));
+    }
+
+    #[test]
+    fn decode_command_velocity_down() {
+        assert_eq!(decode_command(b"VD250"), Some(Command::VelocityDown(250)));
+    }
+
+    #[test]
+    fn decode_command_read_config() {
+        assert_eq!(decode_command(b"CR0"), Some(Command::ReadConfig(0)));
+        assert_eq!(decode_command(b"CR5"), Some(Command::ReadConfig(5)));
+    }
+
+    #[test]
+    fn decode_command_write_config() {
+        assert_eq!(
+            decode_command(b"CW0,1000"),
+            Some(Command::WriteConfig { register: 0, value: 1000 })
+        );
+        assert_eq!(
+            decode_command(b"CW3,-50"),
+            Some(Command::WriteConfig { register: 3, value: -50 })
+        );
+    }
+
+    #[test]
+    fn decode_command_reset() {
+        assert_eq!(decode_command(b"RESET"), Some(Command::Reset));
+    }
+
+    #[test]
+    fn decode_command_park() {
+        assert_eq!(decode_command(b"PARK"), Some(Command::Park));
+    }
+
+    // ── Easycomm III decode response tests ────────────────────────────────────
+
+    #[test]
+    fn decode_status_register() {
+        assert_eq!(decode(b"GS2\n").unwrap(), Response::StatusRegister(2));
+    }
+
+    #[test]
+    fn decode_error_register() {
+        assert_eq!(decode(b"GE4\n").unwrap(), Response::ErrorRegister(4));
+    }
+
+    #[test]
+    fn decode_config_value() {
+        assert_eq!(
+            decode(b"CR0,1000\n").unwrap(),
+            Response::ConfigValue { register: 0, value: 1000 }
+        );
+        assert_eq!(
+            decode(b"CR3,-50\n").unwrap(),
+            Response::ConfigValue { register: 3, value: -50 }
+        );
+    }
+
+    // ── Easycomm III encode response tests ────────────────────────────────────
+
+    #[test]
+    fn encode_response_status_register() {
+        let mut buf = [0u8; 32];
+        let n = encode_response_into(&Response::StatusRegister(2), &mut buf);
+        assert_eq!(&buf[..n], b"GS2\n");
+    }
+
+    #[test]
+    fn encode_response_error_register() {
+        let mut buf = [0u8; 32];
+        let n = encode_response_into(&Response::ErrorRegister(4), &mut buf);
+        assert_eq!(&buf[..n], b"GE4\n");
+    }
+
+    #[test]
+    fn encode_response_config_value() {
+        let mut buf = [0u8; 32];
+        let n = encode_response_into(&Response::ConfigValue { register: 0, value: 1000 }, &mut buf);
+        assert_eq!(&buf[..n], b"CR0,1000\n");
     }
 
     #[test]
@@ -797,8 +1363,9 @@ mod tests {
     }
 
     #[test]
-    fn decode_command_query_status() {
-        assert_eq!(decode_command(b"GS"), Some(Command::QueryStatus));
+    fn decode_command_gs_maps_to_get_status_register() {
+        // Bare "GS" on the wire maps to Easycomm III GetStatusRegister.
+        assert_eq!(decode_command(b"GS"), Some(Command::GetStatusRegister));
     }
 
     #[test]

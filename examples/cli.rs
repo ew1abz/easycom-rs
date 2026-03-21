@@ -113,7 +113,14 @@ where
         match session.send(cmd) {
             Ok(Response::Ack) => println!("OK"),
             Ok(Response::Position { az, el }) => println!("AZ={az:03}  EL={el:03}"),
+            Ok(Response::AzimuthPosition(az)) => println!("AZ={az:03}"),
+            Ok(Response::ElevationPosition(el)) => println!("EL={el:03}"),
             Ok(Response::Status(status)) => println!("Status: {status:?}"),
+            Ok(Response::StatusRegister(val)) => println!("Status register: {val}"),
+            Ok(Response::ErrorRegister(val)) => println!("Error register: {val}"),
+            Ok(Response::ConfigValue { register, value }) => {
+                println!("Config[{register}] = {value}")
+            }
             Ok(Response::Error) => println!("Device error (?)"),
             Err(e) => eprintln!("Error: {e}"),
         }
